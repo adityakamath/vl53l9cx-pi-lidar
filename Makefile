@@ -11,9 +11,12 @@ SRC     := app/vl53l9_bringup.c \
 $(APP): $(SRC)
 	$(CC) $(CFLAGS) $(SRC) -o $@ $(LDLIBS)
 
-.PHONY: module clean
+.PHONY: module tools clean
 module:                 ## build the dummy_cam kernel module
 	$(MAKE) -C driver
+tools:                  ## build userspace diagnostic helpers (see tools/)
+	$(MAKE) -C tools
 clean:
 	rm -f $(APP)
 	-$(MAKE) -C driver clean
+	-$(MAKE) -C tools clean

@@ -5,8 +5,12 @@ your phone, laptop, or any device on the same network and watch the sensor live.
 It runs as a standalone companion to the GPU particle viewer, putting the Pi's
 otherwise-idle CPU cores, RAM, and disk to work.
 
-```
-./run_lidar_web.sh            # boots the sensor, serves on :8080
+The default web launcher (`run_lidar_web.sh`) serves the dependency-free **Web Viewer**
+(`viewer/web_view.py`). To serve this full studio on the same pipeline instead, start it
+directly (after `run_lidar_web.sh`'s bring-up steps, or with its FIFO already armed):
+
+```bash
+VL_BINNING=2 VL_PIPE=/tmp/tof_pipe_web python3 web/lidar_web.py   # serves on :8080
 # then open  http://<pi-ip>:8080  in any browser on the LAN
 ```
 
@@ -68,7 +72,7 @@ Everything updates in real time and multiple devices can watch at once.
 |---|---|
 | `web/lidar_web.py` | The server: sensor reader thread + HTTP endpoints + the inline dashboard/WebGL front-end. |
 | `web/lidar_gestures.py` | Standalone, testable gesture-recognition engine. |
-| `run_lidar_web.sh` | Launcher — boots the sensor (same bring-up as the particle viewer) and starts the server. Pass a port as `$1` to override 8080. |
+| `run_lidar_web.sh` | Default web launcher — boots the sensor and serves the Web Viewer (`viewer/web_view.py`). To serve this studio instead, start `web/lidar_web.py` directly with `VL_PIPE=/tmp/tof_pipe_web`. Pass a port as `$1` to override 8080. |
 | `scripts/lidar_web.desktop` | Desktop launcher icon. |
 
 ## Demo mode (no sensor)

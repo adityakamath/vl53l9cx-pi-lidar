@@ -19,7 +19,24 @@ tof_pipe
 *.raw
 *.log
 
+# python bytecode (any directory)
+__pycache__/
+*.pyc
+
+# compiled device-tree overlays (build with dtc -- see README)
+*.dtbo
+
+# built userspace diagnostic helpers (make -C tools)
+/tools/i2c_id
+/tools/i2c_probe
+/tools/i2c_probe_adv
+/tools/set_fmt
+/tools/set_meta_fmt
+
 # web studio runtime
-web/__pycache__/
 web/recordings/
 *.ldr
+
+# local AI-assistant state/config -- never commit
+.cline/
+.clinerules/

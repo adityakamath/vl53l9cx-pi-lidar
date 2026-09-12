@@ -39,8 +39,50 @@ static const char *fsm_name(uint8_t f) {
                  case 2: return "STANDBY"; case 3: return "STREAMING"; default: return "?"; }
 }
 
+/* --- Configurable control bus / address (RPi5 port) -----------------------
+ * Bus resolution order: --i2c PATH  >  $VL_I2C_BUS  >  stable fallbacks.
+ *   RPi5 MIPI0 = /dev/i2c-6 (stable DT symlink; also enumerated as i2c-10),
+ *   RPi5 MIPI1 = /dev/i2c-4,  Pi 4 camera port = /dev/i2c-10. */
+static int open_i2c_bus(const char *opt_path, const char **used_out) {
+    static const char *fallbacks[] = { "/dev/i2c-6", "/dev/i2c-4", "/dev/i2c-10" };
+    const char *env = getenv("VL_I2C_BUS");
+    int fd;
+
+    if (opt_path) {
+        fd = open(opt_path, O_RDWR);
+        if (fd < 0) { perror("[-] --i2c"); return -1; }
+        *used_out = opt_path;
+        return fd;
+    }
+    const char *tries[4];
+    int n = 0;
+    if (env && *env) tries[n++] = env;
+    for (int i = 0; i < 3; i++) tries[n++] = fallbacks[i];
+    for (int i = 0; i < n; i++) {
+        fd = open(tries[i], O_RDWR);
+        if (fd >= 0) { *used_out = tries[i]; return fd; }
+    }
+    fprintf(stderr, "[-] No usable I2C adapter found (tried:");
+    for (int i = 0; i < n; i++) fprintf(stderr, "%s%s", tries[i], i + 1 < n ? ", " : "");
+    fprintf(stderr, "). Pass --i2c PATH or set VL_I2C_BUS.\n");
+    return -1;
+}
+
 int main(int argc, char **argv) {
-    int usecase = (argc > 1) ? atoi(argv[1]) : VL53L9_USECASE_AF_RANGE;
+    /* Options: --i2c PATH (adapter node), --addr N (7-bit slave address).
+     * Remaining positional args: [usecase] [exp_ms] [period_us] [power_mode] [dss_mode]. */
+    const char *opt_i2c = NULL;
+    int opt_addr = -1;
+    static char *pos[8];
+    int npos = 0;
+    pos[npos++] = argv[0];
+    for (int i = 1; i < argc && npos < 8; i++) {
+        if (!strcmp(argv[i], "--i2c") && i + 1 < argc)      { opt_i2c = argv[++i]; continue; }
+        if (!strcmp(argv[i], "--addr") && i + 1 < argc)    { opt_addr = atoi(argv[++i]); continue; }
+        pos[npos++] = argv[i];
+    }
+
+    int usecase = (npos > 1) ? atoi(pos[1]) : VL53L9_USECASE_AF_RANGE;
     int status = 0;
     vl53l9_device_t dev;
     memset(&dev, 0, sizeof(vl53l9_device_t));
@@ -49,22 +91,46 @@ int main(int argc, char **argv) {
     printf(" STMicroelectronics VL53L9CX MIPI CSI-2 Transmitter Boot \n");
     printf("=========================================================\n\n");
 
-    printf("[STEP 1/5] Connecting to camera control interface (/dev/i2c-10)...\n");
-    int fd = open("/dev/i2c-10", O_RDWR);
-    if (fd < 0) { perror("[-] Unable to open /dev/i2c-10."); return 1; }
-    if (ioctl(fd, I2C_SLAVE, 0x29) < 0) { perror("[-] Slave address failed"); close(fd); return 1; }
+    /* Slave address: --addr N > $VL_I2C_ADDR > default 0x29 (7-bit). */
+    uint8_t addr7 = 0x29;
+    const char *env_addr = getenv("VL_I2C_ADDR");
+    if (opt_addr >= 0) {
+        if (opt_addr < 1 || opt_addr > 127) { fprintf(stderr, "[-] --addr out of range\n"); return 1; }
+        addr7 = (uint8_t)opt_addr;
+    } else if (env_addr && *env_addr) {
+        int a = atoi(env_addr);
+        if (a < 1 || a > 127) { fprintf(stderr, "[-] VL_I2C_ADDR out of range\n"); return 1; }
+        addr7 = (uint8_t)a;
+    }
+
+    printf("[STEP 1/5] Connecting to camera control interface...\n");
+    const char *bus_used = NULL;
+    int fd = open_i2c_bus(opt_i2c, &bus_used);
+    if (fd < 0) return 1;
+    if (ioctl(fd, I2C_SLAVE, addr7) < 0) { perror("[-] Slave address failed"); close(fd); return 1; }
 
     dev.bus = (void*)(intptr_t)fd;
     dev.bus_type = PLATFORM_BUS_I2C;
-    dev.address = 0x52;
+    dev.address = (uint8_t)(addr7 << 1);   /* ULD keeps the 8-bit form */
     dev.ext_clock = 12000000;
     dev.vdda = VDDA_2V8;
     dev.vddio = VDDIO_1V8;
-    vl53l9_set_com_config(&dev, dev.address, 0);
-    printf("[+] Control path established.\n");
+    if (addr7 == 0x29) {
+        vl53l9_set_com_config(&dev, dev.address, 0);   /* restore default slave addr/instance */
+    } else {
+        printf("[i] Non-default address 0x%02X: skipping set_com_config (would reprogram the sensor).\n", addr7);
+    }
+    printf("[+] Control path established on %s @ 0x%02X.\n", bus_used, addr7);
 
     uint8_t fsm = 0;
-    vl53l9_read8(&dev, REG_FSM, &fsm);
+    int rret = vl53l9_read8(&dev, REG_FSM, &fsm);
+    if (rret != 0) {
+        fprintf(stderr, "[-] No sensor response at 0x%02X on %s (FSM read ret=%d).\n"
+                        "    Check FFC seating + power; a fresh XSHUT edge may be needed\n"
+                        "    (sudo: unbind/rebind dummy_cam to toggle cam0_reg / line 34).\n",
+                addr7, bus_used, rret);
+        close(fd); return 1;
+    }
     printf("[+] Initial FSM state = %u (%s)\n", fsm, fsm_name(fsm));
 
     /* Unicam can only lock onto a fresh D-PHY LP->HS transition -- it cannot join
@@ -100,21 +166,21 @@ int main(int argc, char **argv) {
            usecase, status, prof->binning, prof->exposure_ms, prof->context, prof->power);
     if (status != 0) {
         printf("[-] set_profile failed (ret=%d). The sensor is in a stale STANDBY that\n", status);
-        printf("    can't be reconfigured. Power-cycle it (reseat the XSHUT jumper) to get\n");
-        printf("    a clean READY_TO_BOOT, then re-run. FSM=%u.\n", fsm);
+        printf("    can't be reconfigured. Give it a fresh XSHUT edge (unbind/rebind dummy_cam\n");
+        printf("    or power-cycle) to get a clean READY_TO_BOOT, then re-run. FSM=%u.\n", fsm);
         close(fd); return 1;
     }
 
-    /* Optional exposure override in ms (argv[2]).  4ms = datasheet 100fps profile. */
-    if (argc > 2) {
-        int ex = atoi(argv[2]);
+    /* Optional exposure override in ms (pos[2]).  4ms = datasheet 100fps profile. */
+    if (npos > 2) {
+        int ex = atoi(pos[2]);
         status = vl53l9_set_exposure(&dev, prof->context, (uint16_t)ex);
         printf("    set_exposure(%dms) ret=%d\n", ex, status);
     }
 
-    /* Optional power mode override (argv[4]): 0=REGULAR 1=LOW 2=ULP. */
-    if (argc > 4) {
-        int pw = atoi(argv[4]);
+    /* Optional power mode override (pos[4]): 0=REGULAR 1=LOW 2=ULP. */
+    if (npos > 4) {
+        int pw = atoi(pos[4]);
         status = vl53l9_set_power_mode(&dev, (vl53l9_power_mode_t)pw);
         printf("    set_power_mode(%d) ret=%d\n", pw, status);
     }
@@ -127,16 +193,16 @@ int main(int argc, char **argv) {
     vl53l9_read8(&dev, ctx_base + 2U, &rb_rep);
     printf("    ctx regs: binning=%u dss_mode=%u repeat=%u\n", rb_bin, rb_dss, rb_rep);
 
-    /* Optional DSS mode override (argv[5]): 0=DISABLE 1=LONG 2=SHORT.
+    /* Optional DSS mode override (pos[5]): 0=DISABLE 1=LONG 2=SHORT.
        Datasheet 100fps "Gaming" profile runs precision with DSS disabled. */
-    if (argc > 5) {
-        int dss = atoi(argv[5]);
+    if (npos > 5) {
+        int dss = atoi(pos[5]);
         status = vl53l9_write8(&dev, ctx_base + 1U, (uint8_t)dss);
         printf("    set_dss_mode(%d) reg=0x%04X ret=%d\n", dss, ctx_base + 1U, status);
     }
 
     /* Frame period (argv[3], us). Default 10000us -> 100 Hz. */
-    uint32_t period = (argc > 3) ? (uint32_t)atoi(argv[3]) : 10000;
+    uint32_t period = (npos > 3) ? (uint32_t)atoi(pos[3]) : 10000;
     status = vl53l9_set_frame_period(&dev, period);
     printf("    set_frame_period(%uus) ret=%d\n", period, status);
     uint32_t rb_period = 0; uint16_t rb_exp = 0;

@@ -1,0 +1,98 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * VL53L9CX time-of-flight lidar (STEVAL-VL53L9) on Raspberry Pi 5 (BCM2712 + RP1).
+ *
+ * The VL53L9CX streams a RAW8 (datatype 0x2A, single data lane) MIPI CSI-2 image of
+ * the ranging results and is configured over the camera connector I2C bus by
+ * userspace (app/vl53l9_bringup). The kernel side only needs:
+ *   - the RP1 CSI receiver (CFE) enabled with a 1-lane endpoint,
+ *   - the connector I2C bus enabled so userspace can talk to the sensor,
+ *   - a dummy CSI-2 sensor subdevice node matched by driver/dummy_cam.ko.
+ *
+ * XSHUT: on this module the VL53L9's XSHUT pin is wired straight to MIPI0
+ * connector pin 17 = CD0_IO0 = RP1 GPIO line 34, and there is NO power-enable
+ * net at all (the sensor rail is always on). So instead of a vdd-supply the
+ * sensor node declares xshut-gpios, and cam0_reg -- which the baseboard
+ * defines as a camera-rail enable regulator on that same line -- is disabled
+ * so it stops claiming/driving it. dummy_cam.ko then owns line 34 exclusively
+ * and exposes /sys/devices/platform/vl53l9/xshut_cycle. Polarity: XSHUT must
+ * be held HIGH for the sensor to initialize/run; LOW = shutdown, so the driver
+ * always leaves the line HIGH after a reset edge.
+ * NOTE: this matches the current FFC wiring (second port, cam0 variant). If
+ * the cable moves to the main port (MIPI1), XSHUT would be on line 46 and
+ * cam1_reg would need disabling instead -- adjust xshut-gpios accordingly.
+ *
+ * Default: MIPI1 connector = main camera port (csi1 + i2c_csi_dsi -> /dev/i2c-4),
+ * matching the official imx500-pi5 convention and the Pi 4 csi1 layout.
+ * For the second CSI port (MIPI0: csi0 + i2c_csi_dsi0 -> /dev/i2c-6) use:
+ *     dtoverlay=vl53l9-mipi-pi5,cam0
+ */
+#include <dt-bindings/gpio/gpio.h>
+
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2712";
+
+	i2c_frag: fragment@0 {
+		target = <&i2c_csi_dsi>;
+		__overlay__ {
+			status = "okay";
+		};
+	};
+
+	csi_frag: fragment@1 {
+		target = <&csi1>;
+		__overlay__ {
+			status = "okay";
+
+			port {
+				csi_to_sensor: endpoint {
+					remote-endpoint = <&sensor_to_csi>;
+					clock-lanes = <0>;
+					data-lanes = <1>;  /* VL53L9CX: single data lane */
+				};
+			};
+		};
+	};
+
+	sensor_frag: fragment@2 {
+		target-path = "/";
+		__overlay__ {
+			vl53l9_sensor: vl53l9 {
+				compatible = "raspberrypi,dummy-csi2-sensor";
+				status = "okay";
+
+				/* VL53L9 XSHUT: must be held HIGH for the sensor to
+				 * initialize/run, LOW = shutdown (ROM boots to
+				 * READY_TO_BOOT after a release edge). See header note
+				 * above -- no vdd-supply exists because this module has
+				 * no power-enable net; dummy_cam.ko owns this line. */
+				xshut-gpios = <&gpio 34 GPIO_ACTIVE_HIGH>;
+
+				port {
+					sensor_to_csi: endpoint {
+						remote-endpoint = <&csi_to_sensor>;
+					};
+				};
+			};
+		};
+	};
+
+	cam0reg_frag: fragment@3 {
+		target = <&cam0_reg>;
+		__overlay__ {
+			/* Baseboard thinks line 34 is a camera-rail enable; on this
+			 * module it is XSHUT. Left active it would (a) hold the sensor
+			 * in shutdown while "enabled" and (b) keep the GPIO claimed so
+			 * dummy_cam.ko could not use it as xshut-gpios. */
+			status = "disabled";
+		};
+	};
+
+	__overrides__ {
+		cam0 = <&i2c_frag>, "target:0=", <&i2c_csi_dsi0>,
+		       <&csi_frag>, "target:0=", <&csi0>;
+	};
+};
