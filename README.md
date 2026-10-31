@@ -52,6 +52,16 @@ run; LOW = shutdown. How it is handled differs per board:
   a fresh power-up puts the sensor in `READY_TO_BOOT` for a clean firmware init, once per
   power cycle — see [Implementation notes](#implementation-notes).
 
+  **AP_CLK jumper (boards with the on-board oscillator disabled):** the sensor also
+  needs a 12 MHz clock on its AP_CLK pin. Per ST's schematic (UM3655), the STEVAL-VL53L9
+  can ship strapped for a host-supplied clock, with its on-board 12 MHz oscillator
+  disabled. Symptoms: the sensor never answers at 0x29, or answers but every register
+  read fails. On such a board, wire the **AP_CLK** pin of the STEVAL **J2 header** to a
+  clock-capable Pi GPIO, e.g. **GPIO 4 (header pin 7, GPCLK0)**, and connect **GND** to a
+  Pi ground pin. The clock must be exactly 12 MHz. This wiring was verified on a Pi 5,
+  not on a Pi 4. The Pi 4 overlay (`driver/vl53l9-mipi.dts`) doesn't start that clock
+  yet, so a Pi 4 build also needs GPCLK0 enabled at 12 MHz on GPIO 4.
+
 - **Pi 5:** no jumpers or extra wires. Plug the STEVAL into the **CAM/DISP 0** (MIPI0)
   connector with the flex cable that comes with the board. The Pi drives both control
   signals through the ribbon:
@@ -134,8 +144,7 @@ sudo cp vl53l9-mipi.dtbo /boot/firmware/overlays/
 sudo reboot
 ```
 
-**Raspberry Pi 5** (RP1 CFE receiver; tested on Raspberry Pi OS based on Debian 13
-"trixie", kernel 6.18, 64-bit):
+**Raspberry Pi 5** (RP1 CFE receiver):
 
 ```bash
 # build dependencies
