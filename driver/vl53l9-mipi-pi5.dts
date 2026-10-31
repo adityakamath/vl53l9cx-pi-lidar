@@ -69,7 +69,23 @@
 				 * READY_TO_BOOT after a release edge). See header note
 				 * above -- no vdd-supply exists because this module has
 				 * no power-enable net; dummy_cam.ko owns this line. */
+				/* STEVAL-VL53L9 + stock flex on MIPI0 (this setup):
+				 * CD0_IO0 (line 34) = XSHUT;
+				 * CD0_IO1 (line 35) = AP_CLK. The board's own oscillator
+				 * is disabled, so the host must supply a 12 MHz AP_CLK.
+				 * GPIO35 can only output PWM1 channel 0. PWM1 runs from
+				 * 96 MHz (fragment@5); the counter runs 0..range, so
+				 * 12 MHz needs range=7 (8 ticks). The rpi-pwm driver
+				 * rounds period*100MHz, so request 70 ns (-> range 7)
+				 * and 42 ns duty (-> 4 ticks, 50%). It must be exactly
+				 * 12 MHz: 10.67 MHz makes the firmware fault on start. */
 				xshut-gpios = <&gpio 34 GPIO_ACTIVE_HIGH>;
+
+				pwms = <&rp1_pwm1 0 70 0>;
+				pwm-names = "ap_clk";
+				ap-clk-duty-ns = <42>;
+				pinctrl-names = "default";
+				pinctrl-0 = <&vl53l9_apclk_pins>;
 
 				port {
 					sensor_to_csi: endpoint {
@@ -88,6 +104,33 @@
 			 * in shutdown while "enabled" and (b) keep the GPIO claimed so
 			 * dummy_cam.ko could not use it as xshut-gpios. */
 			status = "disabled";
+		};
+	};
+
+	/* Route GPIO35 (CD0_IO1) to PWM1 channel 0 for AP_CLK. */
+	apclk_frag: fragment@4 {
+		target = <&rp1_gpio>;
+		__overlay__ {
+			vl53l9_apclk_pins: vl53l9_apclk_pins {
+				function = "pwm1";
+				pins = "gpio35";
+				bias-disable;
+			};
+		};
+	};
+
+	/* Clock PWM1 at 96 MHz from the (otherwise unused) video PLL:
+	 * 960 MHz VCO / 10 = 96 MHz; 96 MHz / 8 = 12 MHz exactly.
+	 * IDs: 2 = RP1_PLL_VIDEO_CORE, 11 = RP1_PLL_VIDEO_SEC, 18 = RP1_CLK_PWM1.
+	 * The fan on PWM1 channel 3 keeps working. */
+	pwmclk_frag: fragment@5 {
+		target = <&rp1_pwm1>;
+		__overlay__ {
+			assigned-clocks = <&rp1_clocks 2>, <&rp1_clocks 11>,
+					  <&rp1_clocks 18>;
+			assigned-clock-parents = <0>, <0>, <&rp1_clocks 11>;
+			assigned-clock-rates = <960000000>, <96000000>,
+					       <96000000>;
 		};
 	};
 

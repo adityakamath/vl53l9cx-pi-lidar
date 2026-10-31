@@ -52,18 +52,34 @@ run; LOW = shutdown. How it is handled differs per board:
   a fresh power-up puts the sensor in `READY_TO_BOOT` for a clean firmware init, once per
   power cycle — see [Implementation notes](#implementation-notes).
 
-- **Pi 5:** on the current FFC wiring XSHUT lands on MIPI0 connector pin 17 (`CD0_IO0`,
-  RP1 GPIO line 34), and this module has no separate power-enable net. The `dummy_cam`
-  driver therefore owns that line directly and exposes a software reset:
+- **Pi 5:** no jumpers or extra wires. Plug the STEVAL into the **CAM/DISP 0** (MIPI0)
+  connector with the flex cable that comes with the board. The Pi drives both control
+  signals through the ribbon:
+
+  | Connector pin | Pi 5 signal | RP1 GPIO | VL53L9 signal | Driven by |
+  |---|---|---|---|---|
+  | 17 | `CD0_IO0` | 34 | XSHUT | `dummy_cam` GPIO (sysfs reset below) |
+  | 18 | `CD0_IO1` | 35 | AP_CLK (12 MHz) | PWM1 channel 0, started by `dummy_cam` at boot |
+  | 20 / 21 | `CD0_SCL` / `CD0_SDA` | 39 / 38 | I²C (sensor 0x29, EEPROM 0x55 + 0x5d) | `/dev/i2c-6` |
+
+  **AP_CLK must be exactly 12 MHz.** The STEVAL's on-board 12 MHz oscillator is disabled
+  (its OE resistor is fitted), so the sensor runs from the host clock on the AP_CLK pin.
+  Without a clock the sensor answers at 0x29 but every read fails. At 10.67 MHz or
+  12.5 MHz it boots its firmware but faults as soon as ranging starts (`ERROR_STATUS`
+  `0x80` / `0xc0`). GPIO35 has no GPCLK function, only PWM1 channel 0, so the overlay
+  clocks PWM1 at 96 MHz from the otherwise-unused video PLL. An 8-tick period then gives
+  exactly 12 MHz.
+
+  The `dummy_cam` driver holds XSHUT LOW at boot and exposes a software reset:
 
   ```bash
   sudo sh -c 'echo 1 > /sys/devices/platform/vl53l9/xshut_cycle'   # XSHUT LOW → HIGH, wait for boot
   cat /sys/devices/platform/vl53l9/xshut_state                     # 1 = running
   ```
 
-  `run_lidar_web.sh` does this automatically when the sensor is in shutdown. If your cable
-  sits on MIPI1 instead of MIPI0, XSHUT moves to line 46 — see
-  [`driver/vl53l9-mipi-pi5.dts`](driver/vl53l9-mipi-pi5.dts).
+  `run_lidar_web.sh` does this automatically when the sensor is in shutdown. The overlay
+  is written for the **MIPI0** port only (the XSHUT and AP_CLK GPIOs above are MIPI0
+  pins). See [`driver/vl53l9-mipi-pi5.dts`](driver/vl53l9-mipi-pi5.dts).
 
 ---
 
@@ -118,16 +134,42 @@ sudo cp vl53l9-mipi.dtbo /boot/firmware/overlays/
 sudo reboot
 ```
 
-**Raspberry Pi 5** (RP1 CFE receiver; `-Idriver` provides the dt-bindings header):
+**Raspberry Pi 5** (RP1 CFE receiver; tested on Raspberry Pi OS based on Debian 13
+"trixie", kernel 6.18, 64-bit):
 
 ```bash
-sudo insmod driver/dummy_cam.ko
-dtc -@ -I dts -Idriver -O dtb -o vl53l9-mipi-pi5.dtbo driver/vl53l9-mipi-pi5.dts
+# build dependencies
+sudo apt install build-essential device-tree-compiler v4l-utils i2c-tools linux-headers-rpi-2712
+
+# overlay: the .dts uses #include, so run it through the C preprocessor before dtc
+cpp -nostdinc -undef -x assembler-with-cpp -Idriver driver/vl53l9-mipi-pi5.dts \
+  | dtc -@ -I dts -O dtb -o vl53l9-mipi-pi5.dtbo -
 sudo cp vl53l9-mipi-pi5.dtbo /boot/firmware/overlays/
-# then add to /boot/firmware/config.txt:   dtoverlay=vl53l9-mipi-pi5        (MIPI1, main port)
-# or                                       dtoverlay=vl53l9-mipi-pi5,cam0    (MIPI0, second port — current FFC wiring)
+
+# driver: install as a regular module so it loads automatically at every boot
+sudo install -D -m644 driver/dummy_cam.ko /lib/modules/$(uname -r)/extra/dummy_cam.ko
+sudo depmod -a
+
+# enable the overlay on the CAM/DISP 0 (MIPI0) port, then reboot
+echo 'dtoverlay=vl53l9-mipi-pi5,cam0' | sudo tee -a /boot/firmware/config.txt
 sudo reboot
 ```
+
+Rebuild and reinstall `dummy_cam.ko` after every kernel update (`make module`, then the
+`install` + `depmod` lines above). A display on the other port (e.g. Touch Display 2 on
+CAM/DISP 1) is unaffected; it uses its own I²C bus.
+
+After the reboot, check that the clock and receiver came up:
+
+```bash
+dmesg | grep AP_CLK                              # "AP_CLK PWM running: period 70 ns, duty 42 ns"
+sudo cat /sys/kernel/debug/clk/clk_pwm1/clk_rate  # 96000000
+pinctrl get 34-35                                # 34 = output (XSHUT), 35 = PWM1_CHAN0 (AP_CLK)
+```
+
+The kernel may also log `couldn't set clk_pwm1 clk rate to 96000000 (-22), current rate:
+96000000` at boot. That's harmless: the rate is correct. The cooling fan also uses PWM1
+(channel 3) and keeps working.
 
 Confirm the CSI capture node and dummy subdev exist:
 
@@ -164,12 +206,29 @@ gio set ~/Desktop/lidar.desktop metadata::trusted true
 **Viewer keys:** `r` cycles orientation (raw / flipV / flipH / rot180), `q` quits.
 Stop everything with `sudo killall -9 python3 v4l2-ctl`.
 
-**Pi 5** (CFE pipeline; no sudo except the one-time XSHUT wake):
+**Pi 5** (CFE pipeline). Run as your normal user, not with `sudo`. Both scripts ask for
+your password once, for the XSHUT wake:
 
 ```bash
 ./run_lidar_web.sh                  # web dashboard on http://<pi-ip>:8080
 scripts/test/run_stream_test.sh     # headless streaming verification (FPS + stats)
 ```
+
+A working start ends with `[+] SUCCESS: streaming (FSM=STREAMING)`, and
+`/tmp/lidar_web.log` shows about `100.0 FPS` with valid zone counts and distances.
+Stop it with `pkill -f web_view.py; pkill -f 'v4l2-ctl.*stream-mmap'`.
+
+#### Pi 5 troubleshooting
+
+Logs: `/tmp/bringup_web.log` (sensor start-up), `/tmp/v4l2_web.log` (capture),
+`/tmp/lidar_web.log` (viewer).
+
+| Symptom | Likely cause / check |
+|---|---|
+| `sudo: ./run_lidar_web.sh: command not found` | The scripts lost their executable bit: `chmod +x *.sh scripts/test/*.sh`. Run without `sudo`. |
+| `Unable to parse link` / `VIDIOC_STREAMON returned -1` | `media-ctl` addressed the wrong media device. On the Pi 5, `/dev/media0` is the ISP; the CSI receiver is the device whose driver is `rp1-cfe` (find it with `media-ctl -d /dev/mediaN -p`). Its number can change between boots; `run_lidar_web.sh` and `scripts/test/run_stream_test.sh` look it up automatically. |
+| `No sensor response at 0x29` | `i2cdetect -y 6` should show `29` once XSHUT is HIGH. `55` and `5d` are the STEVAL's EEPROM and are always there. No `29`: check `dmesg | grep AP_CLK`, the flex orientation, and that the overlay was loaded with `,cam0`. |
+| Sensor boots but `Stream did not start (FSM=2/STANDBY)` | Read the error status: `i2ctransfer -y 6 w2@0x29 0x00 0x66 r1`. `0x80` / `0xc0` means AP_CLK isn't exactly 12 MHz. Check `clk_pwm1` is 96 MHz. |
 
 Or double-click a **ToF LiDAR** desktop icon (`scripts/*.desktop`).
 
@@ -201,9 +260,10 @@ is the extra CSI row and is dropped.
 
 On the **Pi 5** the same RAW8 stream arrives through the RP1 CFE receiver instead of
 Unicam: the media pipeline is `csi2 → rp1-cfe-csi2_ch0 → /dev/video0`, the sensor's I²C
-bus is the connector bus (`/dev/i2c-6` on MIPI0, `/dev/i2c-4` on MIPI1), and the video
-format must be set with `tools/set_fmt` because the vendor fourcc for RAW8 there is
-`'RGGB'`. The decoder side (FIFO → de-stride → 54 × 42 depth) is identical.
+bus is the MIPI0 connector bus (`/dev/i2c-6`), and the video format must be set with
+`tools/set_fmt` because the vendor fourcc for RAW8 there is `'RGGB'`. The sensor's
+12 MHz AP_CLK comes from the Pi (PWM1 on GPIO35, see the wiring note). The decoder side
+(FIFO → de-stride → 54 × 42 depth) is identical.
 
 ---
 

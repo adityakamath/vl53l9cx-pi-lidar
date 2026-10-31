@@ -37,7 +37,8 @@ echo "[+] Setting video format (RAW8 ${WIDTH}x${HEIGHT})..."
 tools/set_fmt 0 /dev/video0 ${WIDTH} ${HEIGHT} RGGB
 
 echo "[+] Enabling CFE media link (csi2 -> csi2_ch0)..."
-media-ctl -l '"csi2":4->"rp1-cfe-csi2_ch0":0 [1]'
+MEDIA=$(for m in /dev/media*; do media-ctl -d $m -p 2>/dev/null | grep -q 'driver *rp1-cfe' && echo $m && break; done)
+media-ctl -d "$MEDIA" -l '"csi2":4->"rp1-cfe-csi2_ch0":0 [1]'
 
 echo "[+] Launching web viewer on $PIPE (port $PORT)..."
 rm -f "$PIPE"

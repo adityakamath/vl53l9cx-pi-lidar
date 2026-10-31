@@ -6,6 +6,7 @@ set -x
 
 REPO="$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)"
 cd "$REPO" || exit 1
+[ -x ./vl53l9_bringup ] || make -s || exit 1
 [ -x tools/set_fmt ] || make -sC tools || exit 1
 
 # ---------------------------------------------------------------------------
@@ -22,7 +23,9 @@ v4l2-ctl -d /dev/v4l-subdev0 --set-subdev-fmt pad=4,width=100,height=148,code=0x
 tools/set_fmt 0 /dev/video0 100 148 RGGB
 # Enable the internal csi2 -> ch0 media link; CFE's streamon refuses without it.
 # NOTE: v4l-utils 1.30 wants the whole spec as ONE arg and numeric flags (1=enabled).
-media-ctl -l '"csi2":4->"rp1-cfe-csi2_ch0":0 [1]'
+# /dev/media0 is the ISP on the Pi 5; find the rp1-cfe (CSI receiver) media device.
+MEDIA=$(for m in /dev/media*; do media-ctl -d $m -p 2>/dev/null | grep -q 'driver *rp1-cfe' && echo $m && break; done)
+media-ctl -d "$MEDIA" -l '"csi2":4->"rp1-cfe-csi2_ch0":0 [1]'
 
 # ---------------------------------------------------------------------------
 # 2. Headless decoder on the FIFO (reader side; blocks until writer connects)
@@ -49,6 +52,11 @@ sleep 1.5
 #    + REGULAR power + DSS off.  bringup stops any in-flight stream first, so
 #    the armed receiver sees a fresh D-PHY LP->HS transition.
 # ---------------------------------------------------------------------------
+# dummy_cam holds XSHUT LOW after every boot; wake the sensor (root-only sysfs).
+if [ "$(cat /sys/devices/platform/vl53l9/xshut_state 2>/dev/null)" != "1" ]; then
+    sudo sh -c 'echo 1 > /sys/devices/platform/vl53l9/xshut_cycle' || exit 1
+    sleep 0.5
+fi
 ./vl53l9_bringup --i2c /dev/i2c-6 1 4 10000 0 0
 
 echo ---DECODE---

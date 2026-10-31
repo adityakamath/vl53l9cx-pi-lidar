@@ -7,6 +7,8 @@
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/gpio/consumer.h>
+#include <linux/pwm.h>
+#include <linux/of.h>
 #include <media/v4l2-subdev.h>
 #include <media/media-entity.h>
 
@@ -54,6 +56,9 @@ struct dummy_cam {
 
     /* GPIO34 / CD0_IO0 -> VL53L9CX XSHUT */
     struct gpio_desc *xshut;
+
+    /* AP_CLK (sensor external clock, 12 MHz): PWM1 ch0 on GPIO35 */
+    struct pwm_device *ap_pwm;
 
     /*
      * Serialize XSHUT operations with future sensor I2C/CSI operations.
@@ -329,6 +334,33 @@ static int dummy_probe(struct platform_device *pdev)
     }
 
     /*
+     * AP_CLK: the STEVAL-VL53L9 takes its 12 MHz clock from the host over the
+     * ribbon cable (CD0_IO1 / GPIO35), which can only be driven by PWM1
+     * channel 0. Start it now so it is running before XSHUT is released.
+     * Period comes from DT "pwms", duty from "ap-clk-duty-ns" (default:
+     * half the period). The clock must be exactly 12 MHz; see the overlay.
+     */
+    {
+        struct pwm_state st;
+        u32 duty;
+
+        dev->ap_pwm = devm_pwm_get(&pdev->dev, "ap_clk");
+        if (IS_ERR(dev->ap_pwm))
+            return dev_err_probe(&pdev->dev, PTR_ERR(dev->ap_pwm),
+                                 "failed to get ap_clk pwm\n");
+        pwm_init_state(dev->ap_pwm, &st);
+        if (of_property_read_u32(pdev->dev.of_node, "ap-clk-duty-ns", &duty))
+            duty = st.period / 2;
+        st.duty_cycle = duty;
+        st.enabled = true;
+        ret = pwm_apply_might_sleep(dev->ap_pwm, &st);
+        if (ret)
+            return dev_err_probe(&pdev->dev, ret, "failed to start ap_clk pwm\n");
+        dev_info(&pdev->dev, "AP_CLK PWM running: period %llu ns, duty %llu ns\n",
+                 st.period, st.duty_cycle);
+    }
+
+    /*
      * Store driver data before creating the sysfs attribute.
      */
     platform_set_drvdata(pdev, dev);
@@ -451,6 +483,8 @@ static void dummy_remove(struct platform_device *pdev)
 
         mutex_unlock(&dev->power_lock);
     }
+
+    pwm_disable(dev->ap_pwm);
 
     dev_info(&pdev->dev,
              "VL53L9 removed; XSHUT held LOW\n");
