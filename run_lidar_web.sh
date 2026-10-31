@@ -6,7 +6,7 @@
 # the RAW8 stream to web_view.py, which serves a live WebGL depth dashboard on
 # the LAN.  Open http://<pi-ip>:8080 from any device on the network.
 #
-# Alternative app to run_stream_test.sh -- both consume /dev/video0, so run one
+# Alternative app to run_stream_test.sh -- both use the CFE capture node, so run one
 # or the other.  Pass a port as $1 to override 8080.
 REPO="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 cd "$REPO" || exit 1
@@ -29,13 +29,21 @@ pkill -f 'headless_dec[o]de.py' 2>/dev/null
 pkill -f 'v4l2-ctl.*stream-mmap' 2>/dev/null
 sleep 1
 
+# Find V4L2 nodes by name: their numbers depend on driver probe order.
+v4l_node() { for s in /sys/class/video4linux/$1*; do
+    [ "$(cat "$s/name" 2>/dev/null)" = "$2" ] && { echo "/dev/$(basename "$s")"; return; }; done; }
+SENSOR_SD=$(v4l_node v4l-subdev dummy-csi2); CSI2_SD=$(v4l_node v4l-subdev csi2)
+VIDEO=$(v4l_node video rp1-cfe-csi2_ch0)
+[ -n "$SENSOR_SD" ] && [ -n "$CSI2_SD" ] && [ -n "$VIDEO" ] \
+    || { echo "[-] VL53L9 V4L2 nodes not found -- is the vl53l9-mipi-pi5 overlay loaded?"; exit 1; }
+
 echo "[+] Setting subdev formats (dummy_cam x3, SRGGB8_1X8=0x3014)..."
-v4l2-ctl -d /dev/v4l-subdev2 --set-subdev-fmt pad=0,width=${WIDTH},height=${HEIGHT},code=0x3014 >/dev/null
-v4l2-ctl -d /dev/v4l-subdev0 --set-subdev-fmt pad=0,width=${WIDTH},height=${HEIGHT},code=0x3014 >/dev/null
-v4l2-ctl -d /dev/v4l-subdev0 --set-subdev-fmt pad=4,width=${WIDTH},height=${HEIGHT},code=0x3014 >/dev/null
+v4l2-ctl -d "$SENSOR_SD" --set-subdev-fmt pad=0,width=${WIDTH},height=${HEIGHT},code=0x3014 >/dev/null
+v4l2-ctl -d "$CSI2_SD" --set-subdev-fmt pad=0,width=${WIDTH},height=${HEIGHT},code=0x3014 >/dev/null
+v4l2-ctl -d "$CSI2_SD" --set-subdev-fmt pad=4,width=${WIDTH},height=${HEIGHT},code=0x3014 >/dev/null
 
 echo "[+] Setting video format (RAW8 ${WIDTH}x${HEIGHT})..."
-tools/set_fmt 0 /dev/video0 ${WIDTH} ${HEIGHT} RGGB
+tools/set_fmt 0 "$VIDEO" ${WIDTH} ${HEIGHT} RGGB
 
 echo "[+] Enabling CFE media link (csi2 -> csi2_ch0)..."
 MEDIA=$(for m in /dev/media*; do media-ctl -d $m -p 2>/dev/null | grep -q 'driver *rp1-cfe' && echo $m && break; done)
@@ -49,7 +57,7 @@ VL_BINNING=$BIN VL_STRIDE=$STRIDE VL_PIPE=$PIPE VL_PORT=$PORT \
 sleep 1
 
 echo "[+] Arming V4L2 receiver (RAW8 ${WIDTH}x${HEIGHT} -> $PIPE)..."
-nohup v4l2-ctl -d /dev/video0 --stream-mmap --stream-to=$PIPE >/tmp/v4l2_web.log 2>&1 &
+nohup v4l2-ctl -d "$VIDEO" --stream-mmap --stream-to=$PIPE >/tmp/v4l2_web.log 2>&1 &
 sleep 1.5
 
 # --- Sensor XSHUT (root-only sysfs) ------------------------------------------

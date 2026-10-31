@@ -1,7 +1,8 @@
 #!/bin/bash
 # VL53L9CX streaming test (RPi5 CFE): configure the media pipeline, arm the CSI
-# receiver on /dev/video0, init the sensor via I2C (/dev/i2c-6), then verify
-# frames headlessly through a FIFO decoder.  No sudo required (pi owns i2c-6).
+# receiver (CFE capture node), init the sensor via I2C (/dev/i2c-6), then verify
+# frames headlessly through a FIFO decoder.  sudo is used once, to wake the
+# sensor (XSHUT).
 set -x
 
 REPO="$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)"
@@ -9,18 +10,26 @@ cd "$REPO" || exit 1
 [ -x ./vl53l9_bringup ] || make -s || exit 1
 [ -x tools/set_fmt ] || make -sC tools || exit 1
 
+# Find V4L2 nodes by name: their numbers depend on driver probe order.
+v4l_node() { for s in /sys/class/video4linux/$1*; do
+    [ "$(cat "$s/name" 2>/dev/null)" = "$2" ] && { echo "/dev/$(basename "$s")"; return; }; done; }
+SENSOR_SD=$(v4l_node v4l-subdev dummy-csi2); CSI2_SD=$(v4l_node v4l-subdev csi2)
+VIDEO=$(v4l_node video rp1-cfe-csi2_ch0)
+[ -n "$SENSOR_SD" ] && [ -n "$CSI2_SD" ] && [ -n "$VIDEO" ] \
+    || { echo "[-] VL53L9 V4L2 nodes not found -- is the vl53l9-mipi-pi5 overlay loaded?"; exit 1; }
+
 # ---------------------------------------------------------------------------
 # 1. Configure the media pipeline (idempotent; all pad formats reset on reboot)
 #    SRGGB8_1X8 = 0x3014 (v4l2-ctl silently sends code=0 for named codes here).
 # ---------------------------------------------------------------------------
 # Sensor source pad -> csi2 sink pad: both must carry the same mbus code.
-v4l2-ctl -d /dev/v4l-subdev2 --set-subdev-fmt pad=0,width=100,height=148,code=0x3014
+v4l2-ctl -d "$SENSOR_SD" --set-subdev-fmt pad=0,width=100,height=148,code=0x3014
 # csi2 sink + ch0 channel pads; CFE's link_validate requires the channel pad to
 # match the video node S_FMT exactly (width/height/code->fourcc).
-v4l2-ctl -d /dev/v4l-subdev0 --set-subdev-fmt pad=0,width=100,height=148,code=0x3014
-v4l2-ctl -d /dev/v4l-subdev0 --set-subdev-fmt pad=4,width=100,height=148,code=0x3014
+v4l2-ctl -d "$CSI2_SD" --set-subdev-fmt pad=0,width=100,height=148,code=0x3014
+v4l2-ctl -d "$CSI2_SD" --set-subdev-fmt pad=4,width=100,height=148,code=0x3014
 # Video node format (vendor fourcc 'RGGB' == V4L2_PIX_FMT_SRGGB8 on RPi5).
-tools/set_fmt 0 /dev/video0 100 148 RGGB
+tools/set_fmt 0 "$VIDEO" 100 148 RGGB
 # Enable the internal csi2 -> ch0 media link; CFE's streamon refuses without it.
 # NOTE: v4l-utils 1.30 wants the whole spec as ONE arg and numeric flags (1=enabled).
 # /dev/media0 is the ISP on the Pi 5; find the rp1-cfe (CSI receiver) media device.
@@ -43,7 +52,7 @@ sleep 1
 # ---------------------------------------------------------------------------
 pkill -f 'v4l2-ctl.*stream-mmap' 2>/dev/null
 sleep 0.3
-nohup v4l2-ctl -d /dev/video0 --stream-mmap --stream-to=/tmp/tof_pipe \
+nohup v4l2-ctl -d "$VIDEO" --stream-mmap --stream-to=/tmp/tof_pipe \
     > /tmp/v4l2.log 2>&1 &
 sleep 1.5
 

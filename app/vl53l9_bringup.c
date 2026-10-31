@@ -42,9 +42,12 @@ static const char *fsm_name(uint8_t f) {
 /* --- Configurable control bus / address (RPi5 port) -----------------------
  * Bus resolution order: --i2c PATH  >  $VL_I2C_BUS  >  stable fallbacks.
  *   RPi5 MIPI0 = /dev/i2c-6 (stable DT symlink; also enumerated as i2c-10),
- *   RPi5 MIPI1 = /dev/i2c-4,  Pi 4 camera port = /dev/i2c-10. */
+ *   Pi 4 camera port = /dev/i2c-10.
+ * RPi5 MIPI1 (/dev/i2c-4) is deliberately not a fallback: the Pi 5 overlay only
+ * supports MIPI0, and i2c-4 is the bus of whatever sits on CAM/DISP 1 (e.g. a
+ * DSI touch display), which the first write to 0x29 must never reach. */
 static int open_i2c_bus(const char *opt_path, const char **used_out) {
-    static const char *fallbacks[] = { "/dev/i2c-6", "/dev/i2c-4", "/dev/i2c-10" };
+    static const char *fallbacks[] = { "/dev/i2c-6", "/dev/i2c-10" };
     const char *env = getenv("VL_I2C_BUS");
     int fd;
 
@@ -127,7 +130,8 @@ int main(int argc, char **argv) {
     if (rret != 0) {
         fprintf(stderr, "[-] No sensor response at 0x%02X on %s (FSM read ret=%d).\n"
                         "    Check FFC seating + power; a fresh XSHUT edge may be needed\n"
-                        "    (sudo: unbind/rebind dummy_cam to toggle cam0_reg / line 34).\n",
+                        "    (Pi 5: sudo sh -c 'echo 1 > /sys/devices/platform/vl53l9/xshut_cycle';\n"
+                        "    Pi 5 also needs AP_CLK running: dmesg | grep AP_CLK. Pi 4: power-cycle).\n",
                 addr7, bus_used, rret);
         close(fd); return 1;
     }
@@ -166,8 +170,9 @@ int main(int argc, char **argv) {
            usecase, status, prof->binning, prof->exposure_ms, prof->context, prof->power);
     if (status != 0) {
         printf("[-] set_profile failed (ret=%d). The sensor is in a stale STANDBY that\n", status);
-        printf("    can't be reconfigured. Give it a fresh XSHUT edge (unbind/rebind dummy_cam\n");
-        printf("    or power-cycle) to get a clean READY_TO_BOOT, then re-run. FSM=%u.\n", fsm);
+        printf("    can't be reconfigured. Give it a fresh XSHUT edge to get a clean\n");
+        printf("    READY_TO_BOOT, then re-run. FSM=%u.\n", fsm);
+        printf("    Pi 5: sudo sh -c 'echo 1 > /sys/devices/platform/vl53l9/xshut_cycle'; Pi 4: power-cycle.\n");
         close(fd); return 1;
     }
 
