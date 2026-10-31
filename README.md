@@ -92,7 +92,7 @@ run; LOW = shutdown. How it is handled differs per board:
 ├── driver/
 │   ├── dummy_cam.c           # stub CSI-2 subdev (+ XSHUT sysfs control on RPi5)
 │   ├── vl53l9-mipi.dts       # Pi 4 device-tree overlay (csi1 + /dev/i2c-10)
-│   ├── vl53l9-mipi-pi5.dts   # Pi 5 overlay (CFE; [cam0] = MIPI0 port) — see wiring note
+│   ├── vl53l9-mipi-pi5.dts   # Pi 5 overlay (CFE, CAM/DISP 0 = MIPI0 port) — see wiring note
 │   └── Makefile              # builds dummy_cam.ko
 ├── tools/                    # userspace diagnostics: i2c_id / i2c_probe(_adv) / set_fmt
 ├── viewer/
@@ -102,7 +102,7 @@ run; LOW = shutdown. How it is handled differs per board:
 │   └── headless_decode.py    # no-display frame verifier / FPS + stats logger
 ├── web/                      # full Web Studio: gestures, theremin, recording, PLY export
 ├── vendor/st-uld/            # ST VL53L9CX ULD driver (SLA0111) — see LICENSE.txt
-├── scripts/                  # .desktop launchers + xshut_finder.py; test/ = RPi5 bring-up tests
+├── scripts/                  # .desktop launchers + hw_reset.py; test/ = RPi5 bring-up tests
 ├── run_lidar.sh              # Pi 4: one-shot build-if-needed, stream + OpenCV viewer
 ├── run_lidar_gpu.sh          # Pi 4: GPU particle viewer
 ├── run_lidar_web.sh          # Pi 5 (CFE pipeline): web dashboard on :8080
@@ -151,7 +151,7 @@ sudo install -D -m644 driver/dummy_cam.ko /lib/modules/$(uname -r)/extra/dummy_c
 sudo depmod -a
 
 # enable the overlay on the CAM/DISP 0 (MIPI0) port, then reboot
-echo 'dtoverlay=vl53l9-mipi-pi5,cam0' | sudo tee -a /boot/firmware/config.txt
+echo 'dtoverlay=vl53l9-mipi-pi5' | sudo tee -a /boot/firmware/config.txt   # ',cam0' also accepted
 sudo reboot
 ```
 
@@ -227,7 +227,7 @@ Logs: `/tmp/bringup_web.log` (sensor start-up), `/tmp/v4l2_web.log` (capture),
 |---|---|
 | `sudo: ./run_lidar_web.sh: command not found` | The scripts lost their executable bit: `chmod +x *.sh scripts/test/*.sh`. Run without `sudo`. |
 | `Unable to parse link` / `VIDIOC_STREAMON returned -1` | `media-ctl` addressed the wrong media device. On the Pi 5, `/dev/media0` is the ISP; the CSI receiver is the device whose driver is `rp1-cfe` (find it with `media-ctl -d /dev/mediaN -p`). Its number can change between boots; `run_lidar_web.sh` and `scripts/test/run_stream_test.sh` look it up automatically. |
-| `No sensor response at 0x29` | `i2cdetect -y 6` should show `29` once XSHUT is HIGH. `55` and `5d` are the STEVAL's EEPROM and are always there. No `29`: check `dmesg | grep AP_CLK`, the flex orientation, and that the overlay was loaded with `,cam0`. |
+| `No sensor response at 0x29` | `i2cdetect -y 6` should show `29` once XSHUT is HIGH. `55` and `5d` are the STEVAL's EEPROM and are always there. No `29`: check `dmesg | grep AP_CLK`, the flex orientation, and that the flex is in CAM/DISP 0 (the overlay only supports that port). |
 | Sensor boots but `Stream did not start (FSM=2/STANDBY)` | Read the error status: `i2ctransfer -y 6 w2@0x29 0x00 0x66 r1`. `0x80` / `0xc0` means AP_CLK isn't exactly 12 MHz. Check `clk_pwm1` is 96 MHz. |
 
 Or double-click a **ToF LiDAR** desktop icon (`scripts/*.desktop`).

@@ -13,15 +13,20 @@
 #include <media/media-entity.h>
 
 /*
- * VL53L9CX XSHUT
+ * Stub CSI-2 sensor subdevice for the VL53L9CX, plus its control signals.
+ * The sensor itself is configured from userspace over I2C (app/vl53l9_bringup).
  *
- * STEVAL-VL53L9:
- *   MIPI0 connector pin 17 / RP1 GPIO34 (CD0_IO0)
- *       -> VL53L9CX XSHUT
+ * Raspberry Pi 5, STEVAL-VL53L9 on MIPI0 (see driver/vl53l9-mipi-pi5.dts):
+ *   connector pin 17 / RP1 GPIO34 (CD0_IO0) -> VL53L9CX XSHUT   ("xshut-gpios")
+ *   connector pin 18 / RP1 GPIO35 (CD0_IO1) -> VL53L9CX AP_CLK  ("pwms", "ap_clk")
  *
- * Sensor power is always present. GPIO34 controls ONLY XSHUT.
+ * Sensor power is always present. AP_CLK (12 MHz, PWM1 channel 0) is started
+ * at probe so it is running before XSHUT is ever released.
  *
- * Startup policy:
+ * Raspberry Pi 4 (driver/vl53l9-mipi.dts): no "xshut-gpios" or "pwms"; XSHUT is
+ * jumpered high on the STEVAL and the driver is only the CSI-2 subdevice.
+ *
+ * XSHUT startup policy:
  *
  *   driver probe
  *       -> XSHUT LOW
@@ -339,8 +344,10 @@ static int dummy_probe(struct platform_device *pdev)
      * channel 0. Start it now so it is running before XSHUT is released.
      * Period comes from DT "pwms", duty from "ap-clk-duty-ns" (default:
      * half the period). The clock must be exactly 12 MHz; see the overlay.
+     * Overlays without "pwms" (the Pi 4 one: AP_CLK supplied by the board)
+     * skip this; with "pwms" the clock is required.
      */
-    {
+    if (of_property_present(pdev->dev.of_node, "pwms")) {
         struct pwm_state st;
         u32 duty;
 
@@ -484,7 +491,8 @@ static void dummy_remove(struct platform_device *pdev)
         mutex_unlock(&dev->power_lock);
     }
 
-    pwm_disable(dev->ap_pwm);
+    if (dev->ap_pwm)
+        pwm_disable(dev->ap_pwm);
 
     dev_info(&pdev->dev,
              "VL53L9 removed; XSHUT held LOW\n");

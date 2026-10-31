@@ -4,28 +4,25 @@
  *
  * The VL53L9CX streams a RAW8 (datatype 0x2A, single data lane) MIPI CSI-2 image of
  * the ranging results and is configured over the camera connector I2C bus by
- * userspace (app/vl53l9_bringup). The kernel side only needs:
+ * userspace (app/vl53l9_bringup). The kernel side needs:
  *   - the RP1 CSI receiver (CFE) enabled with a 1-lane endpoint,
  *   - the connector I2C bus enabled so userspace can talk to the sensor,
- *   - a dummy CSI-2 sensor subdevice node matched by driver/dummy_cam.ko.
+ *   - a dummy CSI-2 sensor subdevice node matched by driver/dummy_cam.ko,
+ *   - the sensor's control signals, all over the stock STEVAL flex cable.
  *
- * XSHUT: on this module the VL53L9's XSHUT pin is wired straight to MIPI0
- * connector pin 17 = CD0_IO0 = RP1 GPIO line 34, and there is NO power-enable
- * net at all (the sensor rail is always on). So instead of a vdd-supply the
- * sensor node declares xshut-gpios, and cam0_reg -- which the baseboard
- * defines as a camera-rail enable regulator on that same line -- is disabled
- * so it stops claiming/driving it. dummy_cam.ko then owns line 34 exclusively
- * and exposes /sys/devices/platform/vl53l9/xshut_cycle. Polarity: XSHUT must
- * be held HIGH for the sensor to initialize/run; LOW = shutdown, so the driver
- * always leaves the line HIGH after a reset edge.
- * NOTE: this matches the current FFC wiring (second port, cam0 variant). If
- * the cable moves to the main port (MIPI1), XSHUT would be on line 46 and
- * cam1_reg would need disabling instead -- adjust xshut-gpios accordingly.
+ * Port: CAM/DISP 0 (MIPI0: csi0 + i2c_csi_dsi0 -> /dev/i2c-6) only. The XSHUT and
+ * AP_CLK lines below are MIPI0 connector pins. Enable with:
+ *     dtoverlay=vl53l9-mipi-pi5        (",cam0" is accepted for compatibility)
  *
- * Default: MIPI1 connector = main camera port (csi1 + i2c_csi_dsi -> /dev/i2c-4),
- * matching the official imx500-pi5 convention and the Pi 4 csi1 layout.
- * For the second CSI port (MIPI0: csi0 + i2c_csi_dsi0 -> /dev/i2c-6) use:
- *     dtoverlay=vl53l9-mipi-pi5,cam0
+ * Control signals (MIPI0 connector -> STEVAL-VL53L9):
+ *   pin 17  CD0_IO0  RP1 GPIO34  -> XSHUT. Must be HIGH for the sensor to run;
+ *                                   LOW = shutdown. Owned by dummy_cam.ko, which
+ *                                   holds it LOW at boot and exposes
+ *                                   /sys/devices/platform/vl53l9/xshut_cycle.
+ *   pin 18  CD0_IO1  RP1 GPIO35  -> AP_CLK, 12 MHz from PWM1 channel 0. The
+ *                                   STEVAL ships with its on-board oscillator
+ *                                   disabled, so the host must supply it.
+ * There is no power-enable net: the sensor rails come from the connector's 3V3.
  */
 #include <dt-bindings/gpio/gpio.h>
 
@@ -36,14 +33,14 @@
 	compatible = "brcm,bcm2712";
 
 	i2c_frag: fragment@0 {
-		target = <&i2c_csi_dsi>;
+		target = <&i2c_csi_dsi0>;
 		__overlay__ {
 			status = "okay";
 		};
 	};
 
 	csi_frag: fragment@1 {
-		target = <&csi1>;
+		target = <&csi0>;
 		__overlay__ {
 			status = "okay";
 
@@ -64,23 +61,16 @@
 				compatible = "raspberrypi,dummy-csi2-sensor";
 				status = "okay";
 
-				/* VL53L9 XSHUT: must be held HIGH for the sensor to
-				 * initialize/run, LOW = shutdown (ROM boots to
-				 * READY_TO_BOOT after a release edge). See header note
-				 * above -- no vdd-supply exists because this module has
-				 * no power-enable net; dummy_cam.ko owns this line. */
-				/* STEVAL-VL53L9 + stock flex on MIPI0 (this setup):
-				 * CD0_IO0 (line 34) = XSHUT;
-				 * CD0_IO1 (line 35) = AP_CLK. The board's own oscillator
-				 * is disabled, so the host must supply a 12 MHz AP_CLK.
-				 * GPIO35 can only output PWM1 channel 0. PWM1 runs from
+				/* XSHUT (see header). The sensor's ROM boots to
+				 * READY_TO_BOOT after a LOW -> HIGH edge. */
+				xshut-gpios = <&gpio 34 GPIO_ACTIVE_HIGH>;
+
+				/* AP_CLK. GPIO35 can only output PWM1 channel 0. PWM1 runs from
 				 * 96 MHz (fragment@5); the counter runs 0..range, so
 				 * 12 MHz needs range=7 (8 ticks). The rpi-pwm driver
 				 * rounds period*100MHz, so request 70 ns (-> range 7)
 				 * and 42 ns duty (-> 4 ticks, 50%). It must be exactly
 				 * 12 MHz: 10.67 MHz makes the firmware fault on start. */
-				xshut-gpios = <&gpio 34 GPIO_ACTIVE_HIGH>;
-
 				pwms = <&rp1_pwm1 0 70 0>;
 				pwm-names = "ap_clk";
 				ap-clk-duty-ns = <42>;
@@ -99,10 +89,9 @@
 	cam0reg_frag: fragment@3 {
 		target = <&cam0_reg>;
 		__overlay__ {
-			/* Baseboard thinks line 34 is a camera-rail enable; on this
-			 * module it is XSHUT. Left active it would (a) hold the sensor
-			 * in shutdown while "enabled" and (b) keep the GPIO claimed so
-			 * dummy_cam.ko could not use it as xshut-gpios. */
+			/* The baseboard defines line 34 as a camera-rail enable; on this
+			 * module it is XSHUT. Left active, the regulator would claim the
+			 * GPIO so dummy_cam.ko could not use it as xshut-gpios. */
 			status = "disabled";
 		};
 	};
@@ -134,6 +123,8 @@
 		};
 	};
 
+	/* "cam0" is kept so existing "dtoverlay=vl53l9-mipi-pi5,cam0" lines still
+	 * work; it re-selects the MIPI0 targets that are already the default. */
 	__overrides__ {
 		cam0 = <&i2c_frag>, "target:0=", <&i2c_csi_dsi0>,
 		       <&csi_frag>, "target:0=", <&csi0>;

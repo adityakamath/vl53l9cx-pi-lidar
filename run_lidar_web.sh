@@ -1,5 +1,6 @@
 #!/bin/bash
-# VL53L9CX LiDAR Web Viewer launcher (RPi5 CFE pipeline, no sudo).
+# VL53L9CX LiDAR Web Viewer launcher (RPi5 CFE pipeline). Run as a normal
+# user; sudo is used once, to wake the sensor (XSHUT).
 #
 # Boots the sensor (bringup usecase 1 = binning-2 / 100x148 @ 100 Hz) and feeds
 # the RAW8 stream to web_view.py, which serves a live WebGL depth dashboard on
@@ -53,18 +54,12 @@ sleep 1.5
 
 # --- Sensor XSHUT (root-only sysfs) ------------------------------------------
 # dummy_cam holds XSHUT LOW after every boot; the sensor is in shutdown and will
-# not answer I2C until cycled HIGH.  Uses SSHPASS env if set, else prompts via
-# sudo in your terminal.
+# not answer I2C until cycled HIGH.  sudo prompts in your terminal.
 XSTATE=$(cat /sys/devices/platform/vl53l9/xshut_state 2>/dev/null || echo x)
 if [ "$XSTATE" != "1" ]; then
     echo "[+] XSHUT is LOW -- cycling to wake the sensor (root required)..."
-    if [ -n "${SSHPASS:-}" ]; then
-        printf '%s\n' "$SSHPASS" | sudo -S sh -c 'echo 1 > /sys/devices/platform/vl53l9/xshut_cycle' \
-            || { echo "[-] XSHUT cycle failed (bad SSHPASS?)"; exit 1; }
-    else
-        sudo sh -c 'echo 1 > /sys/devices/platform/vl53l9/xshut_cycle' \
-            || { echo "[-] XSHUT cycle failed. Manual: sudo sh -c 'echo 1 > /sys/devices/platform/vl53l9/xshut_cycle'"; exit 1; }
-    fi
+    sudo sh -c 'echo 1 > /sys/devices/platform/vl53l9/xshut_cycle' \
+        || { echo "[-] XSHUT cycle failed. Manual: sudo sh -c 'echo 1 > /sys/devices/platform/vl53l9/xshut_cycle'"; exit 1; }
     sleep 0.5
 fi
 
